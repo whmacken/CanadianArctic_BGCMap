@@ -1,0 +1,346 @@
+---
+title: "Arctic_BGC_Map"
+author: "William H MacKenzie"
+date: "30/11/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(raster)
+require(mapview)
+require(plyr)
+require (dplyr)
+require (rgdal)
+require (knitr)
+require(rasterVis) 
+require(ggplot2)
+require(sf)
+require(fasterize)
+require(purrr)
+require(parallel)
+require(GSIF)
+require(snowfall)
+require(tmap)
+require(tidyverse)
+require(data.table)
+require(velox)
+require(tictoc)
+require (randomForest)
+# list.of.packages <- c("plyr", "parallel", "", "raster", 
+#                       "rgdal", "", "knitr", "", "", "dplyr")
+# new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+# if(length(new.packages)) install.packages(new.packages, dependencies = TRUE)
+
+```
+
+```{r set folders, echo = FALSE, eval = FALSE }
+
+data.dir <-"SpatialFiles/ClimateNA/"
+training.dir <- "./TrainingPts/"
+list.files(data.dir)
+
+```
+
+
+## 0. Create a raster stack of ClimateNA  for Canada only
+This chunk may only need to be run once.
+
+```{r load Raster, echo = TRUE, message= FALSE, include = T, results = "hide"}
+
+# # read in a rasters DEM first
+# 
+# file = list.files(data.dir, "ClimateNA_DEM", recursive = T, full.names = T)
+# CNA_proj <- "+proj=lcc +lat_1=49 +lat_2=77 +lat_0=0 +lon_0=-95 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs"# CRS as set in ClimateNA
+# dem <- raster(file)
+# crs(dem) <- CNA_proj
+#   ##raster_names <- as.list (list.files(path=data.dir, pattern="*.asc$") )
+# raster_stk <- list.files(data.dir,full.names = T) %>% map(raster) %>% stack()
+# raster_stk<- setMinMax(raster_stk)
+# NAvalue(raster_stk) = -9999
+# crs(raster_stk) <- CNA_proj
+# plot(raster_stk[[8]])
+# writeRaster(raster_stk,filename= names(raster_stk), bylayer=T, format="GTiff", overwrite=TRUE)
+# ##restack the tiff versions
+# raster_stk <- list.files(data.dir,full.names = T) %>% map(raster) %>% stack()
+# stackSave(raster_stk, (paste0(data.dir, "ClimateNA_stk.tif")))
+# raster_stk<- stackOpen(paste0(data.dir, "ClimateNA_stk.tif"))
+# 
+# ####Mask by Canadian shapefile
+# ###load up shape file of Canada for masking
+can_prov <- readOGR("./SpatialFiles/Canada_provs/CanadianProvinces.gpkg")
+aoi <- st_as_sf(can_prov)
+  ## convert to a raster
+can_prov_raster <- fasterize(aoi, raster_stk[[1]], field = "PRENAME")
+
+  ## plot to see the extents
+plot(can_prov)
+
+  ## use the SBS raster to mask the values of dem
+raster_stk_Canada <- mask(raster_stk, can_prov_raster)#, "./SpatialFiles/ClimateNA_Canada2.tif", labels(raster_stk), overwrite = TRUE)
+#ClimateNA_names <- as.character (names(raster_stk))
+# write.csv(ClimateNA_names, "ClimateNA_varnames.csv")
+# names(raster_stk_Canada) <- ClimateNA_names
+# 
+# mapview(raster_stk_Canada[["DD5"]])
+#   ## check the output
+# plot(raster_stk_Canada)
+```
+
+## 1. Load training points and extract values at points 
+
+Now we have set up our raster layers, we can use our raster stack to extract values at each point. We can use the entire area aoi.  
+
+```{r extract vals, echo = T, include = T, results = "hide"}
+raster_stk_Canada <- stack("./SpatialFiles/ClimateNA_Canada.tif ")#("./SpatialFiles/ClimateNA/ClimateNA_stk.tif")
+raster_stk<- stackOpen(paste0(data.dir, "ClimateNA_stk.tif"))
+###load in names file
+ClimateNA_names <- as.character (names(raster_stk_Canada))
+
+# ####Add in training points for Arctic Zones
+# 
+# #Lets generate some sample points within our aoi
+# pts <- st_sample(aoi, size = 25) 
+# pts.xy <- st_coordinates(pts)
+# 
+# 
+# plot(dem)
+# plot(pts, add = TRUE)
+# 
+# # extract values from single raster 
+# raster.xy <- raster::extract(dem, st_coordinates(pts))
+# 
+# # extract values from single raster 
+# raster.xy.s <- raster::extract(raster_stk_Canada, st_coordinates(pts))
+# 
+# # add the xy values 
+# raster.xy.s <- cbind(raster.xy.s, pts.xy)
+```
+
+
+#2 Import training points CSV from 2018 update to map units and convert to raster
+```{r import 2018 training points }
+rTemp <- dem  #raster(paste(in_var,"Deception_DEMLayers/2.5m/TPI_2.5m_final.tif", sep = ""))
+CNA_proj <- "+proj=lcc +lat_1=49 +lat_2=77 +lat_0=0 +lon_0=-95 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs"# CRS as set in ClimateNA
+###example for use as a template in raster build
+#rTemp <- raster("C:/2.5m/final/TPI_2.5m_final.tif")
+##for using pre-existing training data from 2018
+pnts <- fread("./TrainingPts/ArcticZonePlotLocations.csv", stringsAsFactors = FALSE)
+#  pnts <- st_read(dsn = "TrainingPts", layer = "ArcticZonePlotLocations"
+ pnts <-  pnts[!duplicated(pnts[,c(5:6)]),] # remove any points that have duplicated locations
+ pnts$Zone <- as.factor(pnts$Zone)
+ pnts2 <- SpatialPointsDataFrame( pnts[,5:6],pnts) # convert data frame to spatial points
+crs(pnts2) <- CRS ("+init=epsg:4326") # set crs to WGS84
+ crs(pnts2)
+# write a shapefile
+writeOGR(pnts2,   dsn = "./TrainingPts", layer = "ZoneTrainingPts", driver="ESRI Shapefile", overwrite_layer=TRUE)
+
+pnts_sf <- st_as_sf(pnts2)
+   pnts_sf <- st_transform(pnts_sf, CNA_proj)
+ mapview(pnts_sf)
+ 
+ pnts.xy <- st_coordinates(pnts_sf)
+####Load up raster stack
+raster_stk<- stackOpen(paste0(data.dir, "ClimateNA_stk.tif"))
+## convert to velox object for fast extraction
+tic()
+vx <- velox::velox(raster_stk) ## this takes about a minute
+toc()
+# extract values from raster stack
+tic()
+raster.xy.s <- vx$extract_points(sp = pnts_sf) ## this is incredible fast .5 secs
+toc()
+#####produce final training set
+raster.xy.s <- cbind(raster.xy.s, pnts.xy)
+training_dat <- as.data.frame(raster.xy.s)
+colnames(training_dat) <- names(raster_stk)
+training_dat2 <- cbind(pnts, training_dat)
+training_dat2 <-  training_dat2 [!(training_dat2$ClimateNA_DEM == "NA"),]
+```
+
+## Extract raster stack data for training point and transect rasters
+
+```{r extract spatial data for training points }
+    #velox(rall) #  could provide a faster method
+# tic()
+#        rall <- Pnts ### first only non-transect points
+# 
+# beginCluster(n=7)
+#         rall2 <- as.data.frame (rasterToPoints(rall))
+#         names (rall2) [3] <- "Zone"
+# endCluster()
+# 
+# beginCluster(cl)
+# rall3 <- as.data.frame (raster::extract(ancDat, rall2[,1:2]))#
+# endCluster()
+# 
+# rall2 <- tibble::rownames_to_column(rall2)
+# rall3 <- tibble::rownames_to_column(rall3)
+# rall4 <- left_join(rall2, rall3)
+# train_pt <- as.data.frame (rall4[complete.cases(rall4),])
+# train_pt$MapUnit <- as.factor(train_pt$MapUnit)
+# #write.csv(train_pt, "./inputs/Training2018_w_data.csv", row.names = FALSE)
+# 
+# ####Repeat process for transect data
+# 
+# rall <-  rastAll ###next stack for transect rasters
+# 
+# beginCluster(n=7)
+#         rall2 <- as.data.frame (rasterToPoints(rall))
+#         names (rall2) [3] <- "MapUnit"
+# endCluster()
+# 
+# beginCluster(cl)
+# rall3 <- as.data.frame (raster::extract(ancDat, rall2[,1:2]))# find a faster method
+# endCluster()
+# 
+# rall2 <- tibble::rownames_to_column(rall2)
+# rall3 <- tibble::rownames_to_column(rall3)
+# rall4 <- left_join(rall2, rall3)
+# train_tr <- as.data.frame (rall4[complete.cases(rall4),])
+# ###remove unclassified areas
+# train_tr <- train_tr[!train_tr$MapUnit == 0,]
+# train_tr$MapUnit <- as.factor(train_tr$MapUnit)
+# 
+# toc()
+
+
+```
+
+
+## 2. Build Machine Learning Model for Arctic Zones
+
+
+###Create random forest model from combined data to identify most important spatial variables
+
+```{r initial model for variables}
+training_dat3 <- training_dat2 %>% select(-c(PlotNumber, SiteUnit, SubZone,Longitude,Latitude,Elevation, ClimateNA_DEM,ClimateNA_ID,DD_18, DD18))
+training_dat3 <-  droplevels(training_dat3)
+unique(training_dat3$Zone)
+
+training_dat3$Zone <- training_dat3$Zone %>% recode(
+  "Ard+" = "ArcD+", "ARCD" = "ArcD", "ARCE" = "ArcE", "ARCC" = "ArcC")
+
+tic()
+ArcticZone_rf <- randomForest(Zone ~ ., data=training_dat3 , nodesize = 5, do.trace = 10, ###random forest model with all layers
+                         ntree=101, na.action=na.omit, importance=TRUE, proximity=FALSE)
+imp <- as.data.frame(mod1[["importance"]])
+imp <- imp[order(imp$MeanDecreaseAccuracy, decreasing = T),] ##extract importance may want to use Gini
+varImpPlot(mod1, n.var = 15)
+toc()
+```
+
+##4. Predict Arctic Zones in Canada
+
+```{r Predict Map}
+ #load(PEM_rFmodel)  
+    
+# boundbox the raster stack of ancillary data by the BGC polygon of interest
+crs(raster_stk [[1]])
+extent(raster_stk [[1]])
+plot(raster_stk [[1]])
+bbox <- c(-2300000,2000000,7500000,10500000)
+raster_bbox <- crop(raster_stk, extent(bbox))
+plot(raster_bbox [[1]])
+
+tic()
+beginCluster(n=7) 
+x <- clusterR(raster_bbox, predict, args=list(ArcticZone_rf), na.rm = TRUE)
+endCluster()
+toc()
+plot(x)    
+fname = "PredictedArcticZones"
+writeRaster (x, filename = fname, format="GTiff", overwrite=TRUE)
+# # Generate map output 
+#     fname <- "../04Deception_SiteSeriesMaps/SBSmc2_PEM_map_20-08-19_Alllayers_Tptonly.tif"
+# ##reduce the map to the BGC extent
+# 
+# #mod <- raster("../04Deception_SiteSeriesMaps/SBSmc2_PEM_map_11-08-19.tif") ## read in predicted map
+# 
+# decBGC <- st_read(dsn = "../01Deception_Spatial_Layers/Deception_BaseLayers", layer = "BGC_Deception_Dissolved_fixed", quiet = TRUE) # clipped shape file of area BGCs
+# BGC.choose <- "SBSmc2"
+# BGC <- decBGC[decBGC$MAP_LABEL %in% BGC.choose,"MAP_LABEL"] # Select BGC
+# BGCr <- fasterize(BGC, rTemp) # mask doesn't work properly with polygon so convert to raster
+# crs(BGCr) <- CRS("+init=epsg:3005")
+# #BGCr <- st_as_sf(BGC)
+# ##mask out areas
+# #ancDat_st <- st_as_stars(ancDat)
+# 
+# #tic()
+# #x = predict(ancDat, PEM_rFmodel, progress = 'text')
+# #toc()
+# 
+# 
+# #crs(x) <- CRS('+init=EPSG:3005')
+# ###clip to BGC
+# #xclip <- raster::mask (x, BGCr, snap = "out")
+# 
+# # ###generate some summary statistics of MapUnits predicted
+# # mapMU_count <- as.data.frame(freq(xclip, digits=0, value=NULL, useNA='no', merge=TRUE, progress='TRUE'))
+# # writeRaster (xclip, filename = fname, format="GTiff", overwrite=TRUE)
+# # 
+# # tic()
+```
+
+#--------------From Hengel scripts
+##3 .  Tile the ClimateNA raster stack for parallel in Predict function
+## Deception points ----
+library(rgdal)
+library(landmap)
+dec.grid = readRDS("./Day_1/deception/deception_PC_20m.rds")
+#plot(dec.grid[1])
+te = as.vector(dec.grid@bbox)
+## training points
+dec.pnts = "./Day_1/deception/deception_training_pnts_2.5m_transects.tif"
+#raster(dec.pnts)
+system(paste0('gdalwarp ', dec.pnts, ' -r \"near\" -overwrite -tr 5 5 -te ', paste(te, collapse = " "),' \"', gsub('2.5m', '5m', dec.pnts),'\" -co \"COMPRESS=DEFLATE\"'))
+dec.pnts0 = readGDAL(gsub('2.5m', '5m', dec.pnts))
+dec.pnts0 = as(dec.pnts0, "SpatialPointsDataFrame")
+dim(dec.pnts0)
+## 7452 training points
+
+leg = read.csv("./Day_1/deception/deception_MapUnitLegend.csv")
+head(leg)
+dec.pnts0$MapUnit = plyr::join(data.frame(Map_ID=dec.pnts0$band1), leg, match="first")$MapUnit
+dec.pnts0$MapUnit = as.factor(dec.pnts0$MapUnit)
+dec.pnts0$MapUnit = droplevels(dec.pnts0$MapUnit)
+dec.pnts0 = dec.pnts0[!is.na(dec.pnts0$MapUnit),]
+summary(dec.pnts0$MapUnit)
+unlink("./Day_1/deception/deception_training_pnts.gpkg")
+writeOGR(dec.pnts0, "./Day_1/deception/deception_training_pnts.gpkg", "deception_training_pnts", "GPKG")
+
+## fit EML ----
+library(landmap)
+library(mlr)
+library(parallelMap)
+library(ranger)
+library(xgboost)
+library(deepnet)
+SL.library = c("classif.ranger", "classif.xgboost", "classif.nnTrain")
+m.MapUnit = train.spLearner(dec.pnts0["MapUnit"], covariates=dec.grid,
+              oblique.coords = FALSE, spc = FALSE, 
+              predict.type = "prob", SL.library = SL.library)
+m.MapUnit@spModel
+
+## Prediction using parallel processing ----
+#str(m.MapUnit@covariates)
+obj = GDALinfo(dem)
+tile.lst <- getSpatialTiles(obj, block.x=5000, return.SpatialPolygons=TRUE)
+tile.tbl <- getSpatialTiles(obj, block.x=5000, return.SpatialPolygons=FALSE)
+tile.tbl$ID <- as.character(1:nrow(tile.tbl))
+tile.pol = SpatialPolygonsDataFrame(tile.lst, tile.tbl)
+unlink("./Day_1/deception/deception_tiles.gpkg")
+writeOGR(tile.pol, "./Day_1/deception/deception_tiles.gpkg", "deception_tiles", "GPKG")
+tile.ov = over(m.MapUnit@covariates[1], tile.pol)
+str(x)
+pred.MapUnit = predict(m.MapUnit, predictionLocations=m.MapUnit@covariates[which(tile.ov$ID==24),])
+#pred.MapUnit = predict(m.MapUnit, predictionLocations=m.MapUnit@covariates[which(tile.ov$ID==4),])
+library(plotKML)
+m.MapUnit@spModel$factor.levels
+spplot(pred.MapUnit$pred["prob.ESSFmcw_103"], col.regions=SAGA_pal[["SG_COLORS_YELLOW_RED"]], zlim=c(0,1))
+str(pred.MapUnit$pred)
+pred.MapUnit$pred$response.int = as.integer(pred.MapUnit$pred$response)
+writeGDAL(pred.MapUnit$pred["response.int"], "./Day_1/deception/MapUnit_T24.tif", mvFlag = 255, options = c("COMPRESSE=DEFLATE"), type = "Byte")
+png.width = pred.MapUnit$pred@grid@cells.dim[1] * 3
+png.height = pred.MapUnit$pred@grid@cells.dim[2] * 3
+plotKML(pred.MapUnit$pred["response"], file.name="pred_MapUnit.kml", png.width = png.width, png.height = png.height)
