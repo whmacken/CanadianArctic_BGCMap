@@ -1,0 +1,70 @@
+---
+title: "BuildClimateGrid"
+author: "Lizzy Hoffman/Will MacKenzie"
+date: "17/06/2020"
+output: html_document
+---
+## This script builds a base hex polygon layer for use in WNA BGC modelling 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(sp)
+library(sf)
+library(dplyr)
+library(tibble)
+require(raster)
+require(tidyverse)
+require(tictoc)
+require(fasterize)
+```
+
+## Build hex points centroids and related hex polygon layers
+
+```{r cars}
+#### read in boundary layer in 3005 and select a state(s) to generate the hex within.
+wna_boundary = st_read("./SpatialFiles/ERA_boundingbox.gpkg") %>% st_as_sf() %>% 
+  st_transform( crs = st_crs(3347)) %>% ##3347 for canadian lambert
+  st_buffer(., dist = 500) %>%
+  as(., "Spatial")
+wna.pt = spsample(wna_boundary, type = "regular", cellsize = 10000)
+###for current BEC
+as(wna.pt, "sf") %>% st_transform( crs = st_crs(3347)) %>% 
+  rownames_to_column(., var="pt_id") %>%
+  st_write(., dsn = "./outputs/ERA_ptsgrid_10k.gpkg")
+
+wna_BGC = st_read("./outputs/ERA_ZoneMap_1961_1990_dissolved.gpkg") %>% 
+    st_transform( crs = st_crs(3347)) %>%
+  #st_buffer(., dist = 500) %>%
+  as(., "Spatial")
+
+#### create point centroid layer and hex polygon layer
+
+
+
+
+```
+##-------------------------------
+##### Create point set for submitting to ClimateNA
+```{r create ClimateBC submit file}
+##set projection to NAD83 lat/long for both DEM and points file
+CRS.NAD83 <- CRS("+init=epsg:4269")
+WNA_DEM <- raster("D:/CommonTables/DEMs/WNA_DEM_SRT_30m.tif")
+projection(WNA_DEM) <- CRS.NAD83 
+wna.pt2 <- st_as_sf(wna.pt) %>% st_transform( crs = st_crs(CRS.NAD83))
+#extracts elevation for each point in p
+elev <- ""
+elev <- raster::extract(WNA_DEM,wna.pt2)
+elev <- as.data.frame(elev) %>% rownames_to_column("ID1")
+
+wna.pt3 <-  st_coordinates(wna.pt2) 
+wna.pt3 <- as.data.frame(wna.pt3) %>% rownames_to_column("ID1")
+wna_cb <- left_join(wna.pt3, elev) %>% rename("latitude" = Y, "longitude" = X) 
+#wna_cb <- left_join(wna_cb1, ID2)
+
+wna_cb$ID2 <- ""
+pts.info2 <- wna_cb %>% dplyr::select(ID1, ID2, latitude, longitude, elev) #variable order for ClimateWNA .csv
+write.csv (pts.info2, paste0("./outputs/", region, "_400m_HexPts.csv"), row.names = FALSE) 
+gc()
+```
+
+
