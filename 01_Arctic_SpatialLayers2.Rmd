@@ -1,0 +1,607 @@
+---
+title: "Arctic_BGC_Map"
+author: "William H MacKenzie"
+date: "30/11/2019"
+output:
+  html_document: 
+      always_allow_html: true
+      theme: readable
+  always_allow_html: true
+  word_document: default
+  pdf_document: default
+---
+
+## Modelled CAVM subzones in the ERA
+Mapping of the biogeoclimatic units developed from machine learning of field and aircall of CAVM subzone with ClimateNA data.
+
+
+
+Subzone D: Calcareous expression
+•	Zonal tundra of Dryas integrifolia and Carex rupestris enriched with diverse forb flora commonly with high vascular plant cover
+•	Late snow beds dominated by Cassiope tetragona
+•	Riparian areas support low shrub ecosystems dominated by Salix richardonsii
+•	Some shallow organic matter accumulation in more productive wet ecosystems
+Subzone C: Calcareous expression
+•	Zonal tundra of Dryas integrifolia and Carex rupestris + C. fuliginosa with few additional forbs.
+•	High vascular cover in southern areas grading to sparse cover near B boundary
+•	Late snowbeds not dominated by Cassiope tetragona. Carex rupestris and Dryas types.
+•	No shrubs capable of growing >15cm occur even in riparian sites
+•	Some very shallow organic matter accumulation in more productive wet ecosystems
+Subzone B: Calcareous expression
+•	Zonal tundra of sparse Dryas integrifolia with few associated sedges or forbs.
+•	Low vascular cover in most habitats except wetlands.
+•	Late snowbeds dominated by ‘black crust’.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+#knitr::opts_knit$set(root.dir = normalizePath(".."))
+require(raster)
+require(mapview)
+require(plyr)
+require (dplyr)
+require (rgdal)
+require (knitr)
+require(rasterVis) 
+require(ggplot2)
+require(sf)
+require(fasterize)
+require(purrr)
+require(parallel)
+require(GSIF)
+require(snowfall)
+require(tmap)
+require(tidyverse)
+require(data.table)
+require(velox)
+require(tictoc)
+require (randomForest)
+require(caret)
+require(Rcpp)
+require(viridis)
+require(RColorBrewer)
+require(randomcoloR)
+require(pals)
+require(smoothr)
+require(terra)
+#install.packages("smoothr") #, INSTALL_opts = c("--no-multiarch"))
+## list.of.packages <- c("plyr", "parallel", "", "raster", 
+#                       "rgdal", "", "knitr", "", "", "dplyr")
+# new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+# if(length(new.packages)) install.packages(new.packages, dependencies = TRUE)
+
+```
+
+```{r set folders, include=FALSE}
+can_prov <- st_read("./SpatialFiles/Canada_provs/CanadianProvinces.gpkg")
+CAVM <- st_read("./SpatialFiles/CAVM/CAVM_subzones.shp")
+
+data.dir2 <-"./SpatialFiles/ClimateNA/ClimateNA_ERA_81_10/"
+#data.dir2 <-"./SpatialFiles/ClimateNA/ClimateNA_ERA_Ensemble_rcp45_2050s/"
+#data.dir2 <-"./SpatialFiles/ClimateNA/ClimateNA_ERA_61_90/"
+data.dir2 <-"./SpatialFiles/ClimateNA/ClimateNA_NCanada_61_90/"
+#data.dir2 <-"./SpatialFiles/ClimateNA/ClimateNA_ERA_81_10/"
+list.files(data.dir2)
+training.dir <- "./TrainingPts/"
+CNA_proj <- "+proj=lcc +lat_1=49 +lat_2=77 +lat_0=0 +lon_0=-95 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs"# CRS as set in ClimateNA
+ERA_proj <- "+proj=lcc +lat_0=0 +lon_0=-95 +lat_1=49 +lat_2=77 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs" #CRS of Polar
+
+### align spatial layers to CNA
+dem <- raster("./SpatialFiles/ClimateNA/ClimateNA_DEM.tif")
+crs(dem) <- CNA_proj
+###Choose this for ERA study area boundary
+ERA_bound <- st_read("./SpatialFiles/Polar/ERA_boundary_clean.gpkg")
+   ERA_bound2 <- st_transform(ERA_bound, CNA_proj)
+ERA_bbox <- extent(ERA_bound2)
+ERA_bound.rast <- fasterize(ERA_bound2, dem)
+crs(ERA_bound.rast) <- CNA_proj
+###Choose this for Northern Canada boundaries
+NCan_bound <- st_read("./SpatialFiles/Canada_provs/NCanadianProvinces.gpkg")
+   NCan_bound2 <- st_transform(NCan_bound[2], CNA_proj)
+NCan_bbox <- extent(NCan_bound2)
+NCan_bound.rast <- fasterize(NCan_bound2, dem)
+
+crs(NCan_bound.rast) <- CNA_proj
+
+```
+
+```{r crop rasters to ERA or NCan and stack}
+##for loop for all layers in folder
+files <- list.files(path=data.dir2,full.names=TRUE, pattern = "\\.tif$")
+for (i in 1:length(files)) {
+# Reading the raster to crop
+#i=5
+  Env_raster <- raster(files[i])
+filename <- (paste(basename(files[i]), sep=""))
+# Crop the raster
+Env_raster.crop <- crop(Env_raster, ERA_bbox, snap="out")
+crop <- setValues(Env_raster.crop, NA)
+
+#  Rasterize the catchment boundaries, with NA outside the catchment boundaries
+Maskshp.r <- fasterize(ERA_bound2, crop)
+Maskshp.masked <- mask(x=Env_raster.crop, mask=Maskshp.r)
+#plot(Maskshp.masked)
+#Export file to working directory with original name as new name
+writeRaster(Maskshp.masked, paste0(data.dir2,filename), overwrite = TRUE)
+}
+
+## create raster stack}
+raster.list = files <- list.files(path=data.dir2,full.names=TRUE, pattern = "\\.tif$")
+raster_stk <- list.files(data.dir2, full.names = T) %>% purrr::set_names() %>% map(raster) %>% stack()
+raster_stk <- setMinMax(raster_stk)
+NAvalue(raster_stk) = -9999
+crs(raster_stk) <- CNA_proj
+plot(raster_stk[[1]])
+stackSave(raster_stk, (paste0(data.dir2, "ClimateNA_stk_NCanada_61_90.tif")))
+
+```
+
+
+```{r convert ASC to TIF and stack All NA}
+##read in a rasters DEM first
+# 
+# file = list.files(data.dir2, "ClimateNA_DEM", recursive = T, full.names = T)
+#  CNA_proj <- "+proj=lcc +lat_1=49 +lat_2=77 +lat_0=0 +lon_0=-95 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs"# CRS as set in ClimateNA
+# dem <- raster(file)
+# crs(dem) <- CNA_proj
+# raster.list <- list.files(path = data.dir2) ## get original names of layers
+# raster_stk <- list.files(data.dir2, full.names = T) %>% purrr::set_names() %>% map(raster) %>% stack()
+# raster_stk <- setMinMax(raster_stk)
+# NAvalue(raster_stk) = -9999
+# crs(raster_stk) <- CNA_proj
+# plot(raster_stk[[8]])
+# names(raster_stk) <- raster.list
+# writeRaster (raster_stk, file.path = data.dir2, filename = names(raster_stk), bylayer=T, format="GTiff", overwrite=TRUE) ## write rasters back as geotiffs with min max !!! file.path not seeming to work
+# ####***** Must move generated rasters out of root folder into appropriate time period folder before stacking!!!!
+# stackSave(raster_stk, (paste0(data.dir2, "ClimateNA_stk_Ensemble_rcp45_2050s.tif")))
+```
+
+
+```{r load Raster, include = FALSE}
+ raster_stk <- stackOpen("./SpatialFiles/ClimateNA/ClimateNA_NCanada_61_90/ClimateNA_stk_NCanada_61_90.tif") %>% dropLayer("MAR")# drop layers that have NA over parts of the landbase
+
+# ####Mask by Canadian shapefile
+# ###load up shape file of Canada for masking
+#can_prov <- readOGR("./SpatialFiles/Canada_provs/CanadianProvinces.gpkg")
+#CAVM <- readOGR("./SpatialFiles/CAVM/CAVM_subzones.shp")
+# aoi <- st_as_sf(can_prov)
+#   ## convert to a raster
+# can_prov_raster <- fasterize(aoi, raster_stk[[1]], field = "PRENAME")
+# 
+#   ## plot to see the extents
+# plot(can_prov)
+# 
+#   ## use the SBS raster to mask the values of dem
+# raster_stk_Canada <- mask(raster_stk, can_prov_raster)#, "./SpatialFiles/ClimateNA_Canada2.tif", labels(raster_stk), overwrite = TRUE)
+#ClimateNA_names <- as.character (names(raster_stk))
+# write.csv(ClimateNA_names, "ClimateNA_varnames.csv")
+# names(raster_stk_Canada) <- ClimateNA_names
+# 
+# mapview(raster_stk_Canada[["DD5"]])
+#   ## check the output
+# plot(raster_stk_Canada)
+```
+
+#### Import training points CSV 
+The format of the CSV is that used in the export plot locations function of VPro [Plot Number, Zone, Subzone, Site Series, Accuracy, Latitude, Longitude, Elevation].
+```{r import training points data, fig.cap = "Training Points for CAVM subzone" }
+
+CNA_proj <- "+proj=lcc +lat_1=49 +lat_2=77 +lat_0=0 +lon_0=-95 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs"# CRS as set in ClimateNA
+raster_proj <- "+proj=lcc +lat_0=0 +lon_0=-95 +lat_1=49 +lat_2=77 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs" 
+###example for use as a template in raster build
+#rTemp <- raster("C:/2.5m/final/TPI_2.5m_final.tif")
+##for using pre-existing training data from 2018
+pnts_CAVA <- fread("./TrainingPts/ArcticZonePlotLocations_29Dec2020.csv", stringsAsFactors = FALSE)
+ pnts_CAVA <-  pnts_CAVA[!duplicated(pnts_CAVA[,c(6:7)]),] %>% drop_na(Longitude) 
+ pnts_CAVA <- pnts_CAVA %>% dplyr::filter(pnts_CAVA$Longitude > -141) 
+#pnts <- fread("./TrainingPts/ArcticZonePlotLocations_Big.csv", stringsAsFactors = FALSE)#_plot
+pnts_heli <- fread("./TrainingPts/ArcticZoneHeliLocations_14June2020.csv", stringsAsFactors = FALSE)#_heli
+pnts_NWT <- fread("./TrainingPts/NWT_Ecoregion_MapLocations_23Dec2020.csv", stringsAsFactors = FALSE)#_map
+pnts_Que <- fread("./TrainingPts/Quebec_TrainingPts_27Dec2020.csv", stringsAsFactors = FALSE)
+pnts_Add <- fread("./TrainingPts/Other_MapLocations_27Dec2020.csv", stringsAsFactors = FALSE)
+pnts <- rbind(pnts_CAVA,pnts_heli, pnts_Que,pnts_NWT, pnts_Add )
+pnts[,c(6:7)] <- round(pnts[,c(6:7)], 3)
+#  pnts <- st_read(dsn = "TrainingPts", layer = "ArcticZonePlotLocations"
+ pnts <-  pnts[!duplicated(pnts[,c(6:7)]),] %>% drop_na(Longitude)# remove any points that have duplicated locations
+ 
+ pnts$Zone <- pnts$Zone
+ # %>% recode(
+ #   "E(D)" = "E", "E_D" = "E", "E to D" = "E", 
+ #   "D+" = "D", "D to C" = "C", "D(E)" = "E", "D/C" = "D", "D to E" = "D",
+ #   "C to D" = "C", "C/D" = "C", "CD" = "C", "C(D)" = "C", "F" = 'SASW', 'F_SA' = 'SWB', 'G_BOR' = 'BWBS',
+ #   "D+1" = "D1", "D to E1" = "D1", "E to D1" = "E1", "E_D" = "E1")
+ # 
+ remove <- c('SWB1', 'BORA1', 'SAP1', 'SAA1')
+pnts <- pnts %>% filter(!Zone%in% remove )
+
+ pnts2 <- SpatialPointsDataFrame( pnts[,6:7],pnts) # convert data frame to spatial points
+crs(pnts2) <- CRS ("+init=epsg:4326") # set crs to WGS84
+ #crs(pnts2)
+# write a shapefile
+#writeOGR(pnts2,   dsn = "./TrainingPts", layer = "ArcticZoneTrainingPts", driver="ESRI Shapefile", overwrite_layer=TRUE)
+
+pnts_sf <- st_as_sf(pnts2)
+
+   pnts_sf <- st_transform(pnts_sf, CNA_proj)
+
+
+```
+
+#### Map of CAVM subzone field calls
+This map is dynamic and can be zoomed in and out
+
+```{r map of field calls}
+  ###need to harmonize some bad codes in this initial data set
+  pnts_sf$Zone <- pnts$Zone #%>% recode(
+ #   "E(D)" = "E", "E_D" = "E", "E to D" = "E", 
+ #   "D+" = "D", "D to C" = "C", "D(E)" = "E", "D/C" = "D", "D to E" = "D",
+ #   "C to D" = "C", "C/D" = "C", "CD" = "C", "C(D)" = "C", "F" = 'SASW', 'F_SA' = 'SWB', 'G_BOR' = 'BWBS',
+ #   "D+1" = "D1", "D to E1" = "D1", "E to D1" = "E1", "E_D" = "E1")
+ pnts_sf <-  pnts_sf[!pnts_sf$Zone == "",] 
+
+  unique(pnts_sf$Zone) 
+nZone <- length(unique(pnts_sf$Zone))
+
+  pnts_sf$Zone <- as.factor(pnts_sf$Zone)
+  pnts_sf$PlotNumber <- as.factor(pnts_sf$PlotNumber)
+    mapview(pnts_sf,  zcol = "Zone", cex = 3, legend = TRUE, label = pnts_sf$Zone,
+            map.types = "OpenTopoMap", 
+            col.regions =  pals::glasbey) #c("snow","black","lightblue", "green","yellow", "purple", "red" ))#,  rainbow
+    
+    
+```
+#### Map of CAVM subzone field calls harmonized to leading subzone call
+This map is dynamic and can be zoomed in and out
+```{r map of cleaned  calls}
+# 
+#  pnts_sf$Zone <- pnts_sf$Zone %>% recode(
+#   "E(D)" = "E", "E_D" = "E", "E to D" = "E", 
+#    "D+" = "D", "D to C" = "C", "D(E)" = "E", "D/C" = "D", "D to E" = "D",
+#    "C to D" = "C", "C/D" = "C", "CD" = "C", "C(D)" = "C", "F" = 'SASW', 'F_SA' = 'SWB', 'G_BOR' = 'BWBS',
+#    "D+1" = "D1", "D to E1" = "D1", "E to D1" = "E1", "E_D" = "E1",
+#     "D1" = "D", "E1" = "E", "C1" = "C", "SASW1" = "SASW", "SAS1" = "SAS" )
+#  pnts_sf <-  pnts_sf[!pnts_sf$Zone == "",] 
+ 
+ pnts_sf$Zone <- pnts_sf$Zone %>% recode(
+  "E(D)" = "E", "E_D" = "E", "E to D" = "E",
+  "D+" = "D", "D to C" = "C", "D(E)" = "E", "D/C" = "D", "D to E" = "D",
+  "C to D" = "C", "C/D" = "C", "CD" = "C", "C(D)" = "C", "F" = 'SASW', 'F_SA' = 'SWB', 'G_BOR' = 'BWBS',
+  "D+1" = "D1", "D to E1" = "D1", "E to D1" = "E1", "E_D" = "E1")
+
+pnts_sf$Zone <- pnts_sf$Zone %>% recode(
+  "D1" = "D", "E1" = "E", "C1" = "C", "SASW1" = "SASW", "SAS1" = "SAS" )
+
+pnts_sf <-  pnts_sf[!pnts_sf$Zone == "",]
+ 
+ zones <- as.data.frame(unique(pnts_sf$Zone)) %>% rename("zone" = 1) %>% arrange(zone)%>% rowid_to_column("layer")
+nZone <- length(unique(pnts_sf$Zone))
+
+  pnts_sf$Zone <- as.factor(pnts_sf$Zone)
+
+    mapview(pnts_sf,  zcol = "Zone", cex = 5, legend = TRUE, label = pnts_sf$PlotNumber,
+            map.types = "OpenTopoMap", 
+            col.regions =  pals::glasbey) #c("snow","black","lightblue", "green","yellow", "purple", "red" ))#,  rainbow
+    
+    
+```
+
+```{r raster stack to velox, include=FALSE} 
+####Load up raster stack
+raster_stk <- stackOpen("./SpatialFiles/ClimateNA/ClimateNA_61_90/ClimateNA_stk61_90.tif") %>% dropLayer("MAR")
+raster_stk <- stackOpen("./SpatialFiles/ClimateNA/ClimateNA_NCanada_61_90/ClimateNA_stk_NCanada_61_90.tif") %>% dropLayer("MAR")# drop layers that have NA over parts of the landbase
+ClimateNA_names <- as.character (names(raster_stk))
+## convert to velox object for fast extraction
+tic()
+vx <- velox::velox(raster_stk) ## this takes about a half minute for NCanada
+toc()
+vx$write(path = "D:/CommonTables/ClimateNA_rasters/ClimateNA_velox_stk.tif") # write to velox object
+
+```
+
+Add climate data to training points
+```{r extract climate at points from velox, include=FALSE} 
+tic()
+ pnts.xy <- st_coordinates(pnts_sf)
+ raster.xy.s <- vx$extract_points(sp = pnts_sf) ## this is incredible fast .5 secs
+colnames(raster.xy.s) <- names(raster_stk)
+toc()
+#####produce final training set
+raster.xy.s <- cbind(raster.xy.s, pnts.xy)
+training_dat <- as.data.frame(raster.xy.s)
+training_dat2 <- cbind(pnts, training_dat)
+training_dat2 <-  training_dat2 [!(training_dat2$ClimateNA_DEM == "NA"),]
+
+```
+
+#### Build Machine Learning Model for Arctic subzone (CAVM)
+
+Create random forest model from combined data to identify most important variables
+
+```{r initial model for variables}
+
+# 
+# training_dat3 <- training_dat2 %>%
+#   dplyr::select(-c(PlotNumber, SiteSeries, Accuracy, Subzone, Longitude, Latitude, Elevation,
+#                    ClimateNA_DEM, ClimateNA_ID, Zone_Original, X, Y,DD_18, DD18, DD_0))#,))
+# training_dat3 <-  droplevels(training_dat3)
+# 
+# training_dat3$Zone <- training_dat3$Zone %>% recode(
+#   "E(D)" = "E", "E_D" = "E", "E to D" = "E",
+#   "D+" = "D", "D to C" = "C", "D(E)" = "E", "D/C" = "D", "D to E" = "D",
+#   "C to D" = "C", "C/D" = "C", "CD" = "C", "C(D)" = "C", "F" = 'SASW', 'F_SA' = 'SWB', 'G_BOR' = 'BWBS',
+#   "D+1" = "D1", "D to E1" = "D1", "E to D1" = "E1", "E_D" = "E1")
+# 
+# training_dat3$Zone <- training_dat3$Zone %>% recode(
+#   "D1" = "D", "E1" = "E", "C1" = "C", "SASW1" = "SASW", "SAS1" = "SAS" )
+# 
+# training_dat3 <-  training_dat3[!training_dat3$Zone == "",]
+# 
+# zones <- as.data.frame(unique(training_dat3$Zone))  %>% rowid_to_column("layer") %>% rename("zone" = 2) %>% arrange(zone)
+# unique(training_dat3$Zone)
+# nZone <- length(unique(training_dat3$Zone))
+# 
+# training_dat4 <- preProcess(select(training_dat3, - c(Zone)), 
+#                         method = c("nzv","corr"),
+#                         cutoff = .95)
+# training_dat4$method$remove
+# training_dat5 <- dplyr::select(training_dat3, -c(training_dat4$method$remove))
+# training_dat5 <-  drop_na (training_dat5)
+# #X1 <- X1[! X1$BGC == NA,]
+# training_dat5$Zone <- as.factor(training_dat5$Zone)
+# training_dat5 <- droplevels(training_dat5)
+# Zones <- levels(training_dat5$Zone)
+# ###Build Model
+# tic()
+# ArcticZone_rf <- randomForest(Zone ~ ., data=training_dat5 , nodesize = 5, do.trace = 10, ###random forest model with all layers
+#                          ntree=101, na.action=na.omit, importance=TRUE, proximity=FALSE, type = class)
+# imp <- as.data.frame(ArcticZone_rf[["importance"]])
+# imp <- imp[order(imp$MeanDecreaseAccuracy, decreasing = T),] ##extract importance may want to use Gini
+# varImpPlot(ArcticZone_rf)
+# ArcticZone_rf$confusion
+# #ArcticZone_rf$call
+# ### Save model
+# 
+# save(ArcticZone_rf , file = "./rf_models/CanadaZones_model.Rdata")
+
+load ("./rf_models/CanadaZones_model.Rdata")
+
+```
+
+```{r Identify misclassified points}
+# 
+# point.pred <- predict(ArcticZone_rf, data = training_dat5[,-c(1)])
+# 
+# training_dat2$Zone <- training_dat2$Zone %>% recode(
+#   "E(D)" = "E", "E_D" = "E", "E to D" = "E", 
+#   "D+" = "D", "D to C" = "C", "D(E)" = "E", "D/C" = "D", "D to E" = "D",
+#   "C to D" = "C", "C/D" = "C", "CD" = "C", "C(D)" = "C", "F" = 'SASW', 'F_SA' = 'SWB', 'G_BOR' = 'BWBS')
+#   
+# 
+# point.pred2 <- cbind(training_dat2,point.pred)
+# #X2$ID1 <- as.character(training_dat5)
+# training_dat2 <- training_dat2 %>% arrange(Zone)# %>% filter(!Zone == "SWB")
+# zones <- unique(training_dat2$Zone)
+# 
+# point.mis <- point.pred2 %>% select(PlotNumber, Zone, point.pred, Longitude, Latitude) %>% filter(Zone != point.pred) 
+# 
+# write.csv(point.mis, "./outputs/Confused_Points_26_Dec2020.csv", row.names = FALSE)
+```
+
+
+#### Predict Arctic CAVM subzones in Canada based on 1961-90 climateNA variables
+
+```{r Predict Map}
+# load("./rf_models/CanadaZones_model.Rdata") 
+# raster_stk <- stackOpen("./SpatialFiles/ClimateNA/ClimateNA_NCanada_61_90/ClimateNA_stk_NCanada_61_90.tif") %>% dropLayer("MAR")## 1961-90 BASELINE STACK    
+# 
+# tic()
+# beginCluster(n=7) 
+# ArcticZone_map <- clusterR(raster_stk , predict, args=list(ArcticZone_rf), na.rm = TRUE,  type = 'response' )#,progress='text', type='class', factors = ArcticZone_rf$classes)
+# endCluster()
+# toc()
+# plot(ArcticZone_map)    
+# fname = "./outputs/PredictedBGCZones_NCanada1961_90"
+# writeRaster (ArcticZone_map, filename = fname, format="GTiff", overwrite=TRUE)
+```
+#### Map of predicted CAVM subzones in Canada
+```{r Arctic Map, fig.cap = "Predicted Map of CAVM subzones in the ERA" }
+ERA_CAVM <- st_read('./SpatialFiles/Polar/ERA_CAVM_original.gpkg')
+CAVM_NCanada <- raster('./outputs/PredictedBGCZones_NCanada1961_90.tif')
+#tmaptools::palette_explorer() ###tool for choosing colours
+BGC_colour <- brewer.pal("Accent", n = 15)
+tmap_mode("view")
+tboundERA <- tm_shape (ERA_bound2) + tm_borders(lwd = 2)
+tbound <- tm_shape (NCan_bound) + tm_borders()
+tCAVM <- tm_shape (CAVM)+ tm_borders(col = 'red', alpha = 0.5)
+#troad <- tm_shape (roads) + tm_polygons()
+tmap <-  tm_shape (CAVM_NCanada) + tm_raster ( palette = terrain.colors(15),   n=nZone,  legend.show = F)  + tm_layout(main.title = "Predicted CAVM Zone map for Canada")  #stretch.palette = FALSE,= "BGC_colour",(main.title = "Predicted CAVM subzone map for Canada", main.title.size = .75), palette = "BGC_colour"auto.palette.mapping = FALSE,tmap_options(c(plot = 1e6, view = 1e6)) +
+tZone <- tmap + tbound +  tCAVM + tboundERA
+tZone
+
+```
+```{r CAVM map of ERA only}
+# CAVM_NCanada <- raster('./outputs/PredictedBGCZones_NCanada1961_90.tif')
+# 
+# ERA_bound <- st_read("./SpatialFiles/Polar/ERA_boundary_clean.gpkg")
+#    ERA_bound2 <- st_transform(ERA_bound, CNA_proj)
+# ERA_bbox <- extent(ERA_bound2)
+# ERA_bound.rast <- fasterize(ERA_bound2, dem)
+# crs(ERA_bound.rast) <- CNA_proj
+# 
+# Env_raster.crop <- crop(CAVM_NCanada, ERA_bbox, snap="out")
+# crop <- setValues(Env_raster.crop, NA)
+# #  Rasterize the catchment boundaries, with NA outside the catchment boundaries
+# Maskshp.r <- fasterize(ERA_bound2, crop)
+# ERA_CAVM <- mask(x=Env_raster.crop, mask=Maskshp.r) 
+# plot(ERA_CAVM)
+# fname = "./outputs/PredictedBGCZones_ERA_1961_90"
+#writeRaster (ERA_CAVM, filename = fname, format="GTiff", overwrite=TRUE)
+```
+
+#### Predict Arctic Zones redistribution 1981-2010 in Canada
+
+```{r map 81-2010}
+# raster_stk <- stackOpen("./SpatialFiles/ClimateNA/ClimateNA_ERA_81_10/ClimateNA_stk_ERA_81_10.tif") %>% dropLayer("MAR")## 1961-90 BASELINE STACK    
+# 
+# tic()
+# beginCluster(n=7) 
+# ArcticZone_map <- clusterR(raster_stk , predict, args=list(ArcticZone_rf), na.rm = TRUE,  type = 'response' )#,progress='text', type='class', factors = ArcticZone_rf$classes)
+# endCluster()
+# toc()
+# plot(ArcticZone_map)    
+# fname = "./outputs/PredictedBGCZones_ERA_1981_10"
+#writeRaster (ArcticZone_map, filename = fname, format="GTiff", overwrite=TRUE)
+```
+
+#### Predict Arctic Zones redistribution 2050s rcp45 in Canada
+```{r map 2050s}
+#  raster_stk <- stackOpen("./SpatialFiles/ClimateNA/ClimateNA_ERA_Ensemble_rcp45_2050s/ERA_stk_Ensemble_rcp45_2050s.tif") %>% dropLayer("MAR")
+# #plot(raster_bbox[[8]])
+# 
+# tic()
+# beginCluster(n=7) 
+# ArcticZone_map <- clusterR(raster_stk , predict, args=list(ArcticZone_rf), na.rm = TRUE,  type = 'response' )#,progress='text', type='class', factors = ArcticZone_rf$classes)
+# endCluster()
+# toc()
+# plot(ArcticZone_map)    
+# fname = "./outputs/PredictedBGCZones_ERA_2050s"
+# writeRaster (ArcticZone_map, filename = fname, format="GTiff", overwrite=TRUE)
+# drop layers that have NA over parts of the landbase
+```
+
+### Future CAVM distribution
+```{r tmap arrange of climate change CAVM, fig.cap = "Predicted climate change redistribution of CAVM subzones in the ERA" }
+
+CAVM_ERA90 <- raster('./outputs/PredictedBGCZones_ERA_1961_90.tif')
+CAVM_ERA2010 <- raster('./outputs/PredictedBGCZones_ERA_1981_10.tif')
+CAVM_ERA2050 <- raster('./outputs/PredictedBGCZones_ERA_2050s.tif')
+#tmaptools::palette_explorer() ###tool for choosing colours
+BGC_colour <- brewer.pal("Accent", n = 15)
+tmap_mode("view")
+tbound <- tm_shape (ERA_bound) + tm_borders(lwd = 2)
+tCAVM <- tm_shape (ERA_CAVM)+ tm_borders(col = 'red', alpha = 0.5)
+#troad <- tm_shape (roads) + tm_polygons()
+tmap90 <-  tm_shape (CAVM_ERA90) + tm_raster ( palette = terrain.colors(15),  title = "CAVM 1961-90",  n=nZone,  legend.show = F)  + tm_layout() + tbound + tCAVM
+tmap2010 <- tm_shape (CAVM_ERA2010) + tm_raster ( palette = terrain.colors(15),  title = "CAVM 1981-2010",  n=nZone,  legend.show = F)  + tm_layout() + tbound + tCAVM
+tmap2050 <-  tm_shape (CAVM_ERA2050) + tm_raster ( palette = terrain.colors(15),  title = "CAVM rcp45 2050s",  n=nZone,  legend.show = F)  + tm_layout() + tbound + tCAVM
+#stretch.palette = FALSE,= "BGC_colour",(main.title = "Predicted CAVM subzone map for Canada", main.title.size = .75), palette = "BGC_colour"auto.palette.mapping = FALSE,tmap_options(c(plot = 1e6, view = 1e6)) +
+#current.mode <- tmap_mode("plot")
+tZone <- tmap_arrange(tmap90,tmap2010, tmap2050, ncol = 3, sync = TRUE)
+tZone
+#tmap_mode(current.mode)
+```
+
+
+
+###Next Step to Polygonize raster map and eliminate small polygons
+
+```{r clean crumbs}
+#raster to polygon
+# ArcticZone_map <- raster('./outputs/PredictedBGCZones_ERA_1961_90.tif')
+# BGCply <- rasterToPolygons(ArcticZone_map)
+# t2 <- st_as_sf(BGCply)
+# ###dissolve
+# temp3 <- t2 %>% rename(layer = 1)
+# temp3$layer <- as.factor(temp3$layer)
+# temp3$layer <- droplevels(temp3$layer)
+# #temp3 <-  st_as_sf(temp3)#
+# st_precision(temp3) <- .5
+# temp3$layer <- forcats::fct_explicit_na(temp3$layer,na_level = "(None)")
+# temp3 <- temp3[,c("layer","geometry")]
+# t2 <- aggregate(temp3[,-1], by = list(temp3$layer), do_union = T, FUN = mean) %>% rename(layer = Group.1)
+# 
+# 
+# ###now cleanup and remove crumbs
+# library(units)
+# #t3 <- st_cast(t2, "MULTIPOLYGON") %>% st_cast("POLYGON")
+# t3 <- st_cast(t2,"POLYGON")
+# t3 <- t3 %>%
+#   mutate(Area = st_area(.)) %>%
+#   mutate(ID = seq_along(layer))
+# #unique(t3$Area)
+# #zones <- unique(training_dat3$Zone)
+# 
+# 
+# size <- 20000000
+# size <- set_units(size, "m^2")
+# t3$Area <- set_units(t3$Area, "m^2")
+# tSmall <- subset(t3,t3$Area <= size)
+# t3$layer <- as.character(t3$layer)
+# 
+# require(doParallel)
+# coreNum <- as.numeric(detectCores()-1)
+# coreNo <- makeCluster(coreNum)
+# registerDoParallel(coreNo, cores = coreNum)
+# 
+# ###loop through each polygon < size, determine intersects, and assign to zone with most edge touching
+# ###all the built in functions I found only dealt with holes in the middle of polygons
+# i = 1
+# new <- foreach(i = 1:length(tSmall$ID), .combine = rbind, .packages = c("foreach","sf")) %dopar% {
+#   ID <- tSmall$ID[i]
+#   nbrs <- st_intersects(tSmall[i,],t3)[[1]]
+#   nbrs <- nbrs[!nbrs %in% ID]
+#   if(length(nbrs) == 0){return(NULL)}
+#   lines <- st_intersection(t3[ID,],t3[nbrs,])
+#   lines <- st_cast(lines)
+#   l.len <- st_length(lines)
+#   names(l.len) <- lines$layer.1
+#   zn <- names(l.len)[l.len == max(l.len)][1]
+#   newDat <- t3[ID,]
+#   newDat$layer <- zn
+#   newDat
+# }
+# 
+# stopCluster(coreNo)
+# gc()
+# temp <- t3[!t3$ID %in% new$ID,]
+# t3 <- rbind(temp, new) %>%
+#   mutate(layer = as.factor(as.numeric(layer))) %>% arrange(layer)
+# layername <- levels(t3$layer)
+# layermatch <- as.data.frame(levels(t3$layer)) %>% rename("layer" = 1) %>% mutate_if(is.character, as.integer)
+# mappedzones <- left_join(layermatch, zones) %>% rename("zone" = 2)
+# zone.list <- mappedzones$zone
+# t3$layer <- plyr::mapvalues(t3$layer, from = layername, to = zone.list)
+# t3 <- t3 %>% rename("BGC" = layer)
+# 
+# ###now have to combine crumbs with existing large polygons
+# temp2 <- t3
+# st_precision(temp2) <- 0.5
+# t3 <- temp2 %>%
+#   group_by(BGC) %>%
+#   summarise(geometry = sf::st_union(geometry)) %>%
+#   ungroup()
+# 
+# region = "ERA"
+# #mapview(t2, zcol = "BGC")
+# t3 <- st_zm(t3, drop=T, what='ZM')
+# t3 <- t3 %>% st_buffer (0)
+# #st_write(t3, dsn = paste0("./outputs/", region, "_ZoneMap_1961_1990_eliminated20M4.gpkg"), driver = "GPKG", delete_dsn = TRUE)
+# 
+# t3_smooth <- smooth(t3, method = "ksmooth", smoothness = 2)
+# 
+# CNA_proj <- "+proj=lcc +lat_1=49 +lat_2=77 +lat_0=0 +lon_0=-95 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs"# CRS as set in ClimateNA
+# t3_smooth2 <- st_transform(t3_smooth,CNA_proj)
+# st_crs(t3_smooth2) <- CNA_proj
+# st_write(t3_smooth2, dsn = paste0("./outputs/", region, "_CAVM_Map_1961_1991smoothed.gpkg"), driver = "GPKG",delete_dsn = TRUE)
+# # plot
+# # plot(rasterToPolygons(r), col = NA, border = NA) # set up plot extent
+# # plot(t3_smooth2, col = "#4DAF4A", border = "grey20", lwd = 1.5, add = TRUE)
+
+```
+#### Map of predicted CAVM subzones polygons in Canada
+```{r Arctic Map predicted, fig.cap = "Predicted Map of CAVM subzones in the ERA" }
+
+ERA_CAVM_poly <- st_read('./outputs/ERA_CAVM_Map_1961_1991smoothed.gpkg')
+#tmaptools::palette_explorer() ###tool for choosing colours
+BGC_colour <- brewer.pal("Accent", n = 15)
+tmap_mode("view")
+tbound <- tm_shape (ERA_bound) + tm_borders(lwd = 2)
+tCAVM <- tm_shape (ERA_CAVM)+ tm_borders(col = 'red', alpha = 0.5)
+#troad <- tm_shape (roads) + tm_polygons()
+tmap <-  tm_shape (ERA_CAVM_poly ) + tm_polygons("BGC")#  + tm_layout()  #s+ tm_shape(smooth ("layer",  title = "Predicted BGC Zone map for Canada",  auto.palette.mapping = TRUE, , n=nZone,  legend.show = F) tretch.palette = FALSE,= "BGC_colour",(main.title = "Predicted CAVM subzone map for Canada", main.title.size = .75)
+tZone <- tmap + tbound +tCAVM
+tZone
+
+```
+
+
